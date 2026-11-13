@@ -85,7 +85,8 @@ def main():
     log = json.load(open(LOG)) if os.path.exists(LOG) else {}
     now = datetime.now(DUBAI)
     due = []
-    for folder in sorted(os.listdir("queue")):
+    folders = sorted(os.listdir("queue")) if os.path.isdir("queue") else []
+    for folder in folders:
         p = os.path.join("queue", folder, "post.json")
         if folder in log or not os.path.exists(p):
             continue
