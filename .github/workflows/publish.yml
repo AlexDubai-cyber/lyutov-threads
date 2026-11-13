@@ -1,0 +1,39 @@
+name: Публикация в Threads
+
+on:
+  schedule:
+    # 10:17 и 19:17 по Дубаю (UTC+4). GitHub может запускать с задержкой до ~15 минут.
+    - cron: "17 6,15 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "1 = только проверить ключ, ничего не публиковать"
+        default: "1"
+
+permissions:
+  contents: write
+
+concurrency: threads-publish
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Опубликовать пост, если подошло время
+        env:
+          THREADS_TOKEN: ${{ secrets.THREADS_TOKEN }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+        run: python publish.py
+      - name: Сохранить журнал публикаций
+        run: |
+          if [ -n "$(git status --porcelain published.json)" ]; then
+            git config user.name "threads-bot"
+            git config user.email "threads-bot@users.noreply.github.com"
+            git add published.json
+            git commit -m "Журнал: опубликован пост"
+            git push
+          fi
