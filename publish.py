@@ -51,10 +51,12 @@ def wait_ready(cid, tries=20):
 
 
 def raw_url(folder, name):
+    if folder is None:
+        return f"https://raw.githubusercontent.com/{REPO}/{BRANCH}/queue/{urllib.parse.quote(name)}"
     return f"https://raw.githubusercontent.com/{REPO}/{BRANCH}/queue/{folder}/{urllib.parse.quote(name)}"
 
 
-def publish(folder, post):
+def publish(folder, post, name=None):
     text = post["text"]
     imgs = post.get("images", [])
     if len(text) > 500:
@@ -77,6 +79,51 @@ def publish(folder, post):
     return res["id"], info.get("permalink")
 
 
+def load_times():
+    t = json.load(open("times.json")) if os.path.exists("times.json") else {}
+    return t.get("default", {"am": "10:17", "pm": "19:17"}), t.get("dates", {})
+
+
+def slot_time(name, default, dates):
+    """2026-11-16_am -> время из times.json; 2026-11-14_1917 -> 19:17"""
+    day, part = name[:10], name[11:]
+    if part in ("am", "pm"):
+        hhmm = dates.get(day, {}).get(part, default[part])
+    else:
+        hhmm = part[:2] + ":" + part[2:4]
+    return datetime.strptime(day + " " + hhmm, "%Y-%m-%d %H:%M").replace(tzinfo=DUBAI)
+
+
+def list_posts():
+    """Два формата: queue/<имя>/post.json (картинки в папке) и queue/<имя>.json (картинки queue/<имя>_N.png)."""
+    out = {}
+    if not os.path.isdir("queue"):
+        return out
+    for f in sorted(os.listdir("queue")):
+        p = os.path.join("queue", f)
+        if os.path.isdir(p) and os.path.exists(os.path.join(p, "post.json")):
+            out[f] = (f, json.load(open(os.path.join(p, "post.json"))))
+        elif f.endswith(".json") and f[:4].isdigit():
+            out[f[:-5]] = (None, json.load(open(p)))
+    return out
+
+
+def update_metrics(log):
+    """Раз в день собираем просмотры и реакции, чтобы понять пиковые часы."""
+    m = json.load(open("metrics.json")) if os.path.exists("metrics.json") else {}
+    for name, rec in log.items():
+        try:
+            r = call("GET", rec["id"] + "/insights", metric="views,likes,replies,reposts,quotes")
+        except SystemExit as e:
+            print("Метрики недоступны для", name, e)
+            continue
+        vals = {d["name"]: d.get("values", [{}])[0].get("value", d.get("total_value", {}).get("value")) for d in r.get("data", [])}
+        vals["published_at"] = rec.get("at")
+        m[name] = vals
+    json.dump(m, open("metrics.json", "w"), ensure_ascii=False, indent=1)
+    print("Метрики обновлены:", len(m))
+
+
 def main():
     if not TOKEN:
         raise SystemExit("Нет THREADS_TOKEN: добавьте секрет в Settings → Secrets and variables → Actions")
@@ -84,32 +131,34 @@ def main():
     print("Ключ работает, аккаунт:", me.get("username"))
     log = json.load(open(LOG)) if os.path.exists(LOG) else {}
     now = datetime.now(DUBAI)
+    default, dates = load_times()
+    posts = list_posts()
     due = []
-    folders = sorted(os.listdir("queue")) if os.path.isdir("queue") else []
-    for folder in folders:
-        p = os.path.join("queue", folder, "post.json")
-        if folder in log or not os.path.exists(p):
+    for name, (folder, post) in posts.items():
+        if name in log:
             continue
         try:
-            when = datetime.strptime(folder[:15], "%Y-%m-%d_%H%M").replace(tzinfo=DUBAI)
-        except ValueError:
-            print("Пропуск, неверное имя папки:", folder)
+            when = slot_time(name, default, dates)
+        except (ValueError, KeyError):
+            print("Пропуск, неверное имя:", name)
             continue
-        # публикуем, если время наступило, но не позже чем через 6 часов (чтобы не выпускать старьё ночью)
-        if when <= now <= when + timedelta(hours=6):
-            due.append(folder)
+        # время наступило, не позже чем через 6 часов, и только 08:00-22:30 по Дубаю
+        if when <= now <= when + timedelta(hours=6) and (8, 0) <= (now.hour, now.minute) <= (22, 30):
+            due.append((when, name))
+    due.sort()
     if not due:
         print("Нечего публиковать", now.strftime("%Y-%m-%d %H:%M"), "по Дубаю")
-        return
-    for folder in due[:1]:  # не больше одного поста за запуск
-        post = json.load(open(os.path.join("queue", folder, "post.json")))
+    for when, name in due[:1]:  # не больше одного поста за запуск
+        folder, post = posts[name]
         if DRY:
-            print("DRY_RUN: опубликовал бы", folder, "картинок:", len(post.get("images", [])))
+            print("DRY_RUN: опубликовал бы", name, "картинок:", len(post.get("images", [])))
             continue
-        pid, link = publish(folder, post)
-        log[folder] = {"id": pid, "permalink": link, "at": datetime.now(DUBAI).isoformat(timespec="minutes")}
+        pid, link = publish(folder, post, name)
+        log[name] = {"id": pid, "permalink": link, "at": datetime.now(DUBAI).isoformat(timespec="minutes")}
         json.dump(log, open(LOG, "w"), ensure_ascii=False, indent=1)
-        print("Опубликовано:", folder, link)
+        print("Опубликовано:", name, link)
+    if not DRY and (now.hour == 22 or os.environ.get("METRICS") == "1"):
+        update_metrics(log)
 
 
 if __name__ == "__main__":
