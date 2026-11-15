@@ -2,8 +2,9 @@ name: Публикация в Threads
 
 on:
   schedule:
-    # Каждые 30 минут с 08:17 до 22:47 по Дубаю (UTC+4). Время конкретного поста задаёт times.json.
-    - cron: "17,47 4-18 * * *"
+    # Резерв: GitHub запускает cron с большими задержками, поэтому основной режим — цепочка
+    # долгих запусков (каждый ~5 ч 45 мин проверяет очередь раз в минуту и перезапускает себя).
+    - cron: "17 * * * *"
   workflow_dispatch:
     inputs:
       dry_run:
@@ -12,29 +13,29 @@ on:
 
 permissions:
   contents: write
+  actions: write
 
-concurrency: threads-publish
+concurrency:
+  group: threads-publish
+  cancel-in-progress: false
 
 jobs:
   publish:
     runs-on: ubuntu-latest
+    timeout-minutes: 355
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Опубликовать пост, если подошло время
+      - name: Публиковать по расписанию из times.json
         env:
           THREADS_TOKEN: ${{ secrets.THREADS_TOKEN }}
           DRY_RUN: ${{ github.event.inputs.dry_run }}
+          LOOP_MINUTES: ${{ github.event.inputs.dry_run == '1' && '0' || '340' }}
         run: python publish.py
-      - name: Сохранить журнал публикаций
-        run: |
-          touch metrics.json
-          if [ -n "$(git status --porcelain published.json metrics.json)" ]; then
-            git config user.name "threads-bot"
-            git config user.email "threads-bot@users.noreply.github.com"
-            git add published.json metrics.json
-            git commit -m "Журнал публикаций и метрики"
-            git pull --rebase && git push
-          fi
+      - name: Продолжить цепочку
+        if: ${{ !cancelled() && github.event.inputs.dry_run != '1' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run publish.yml --ref main -f dry_run=0
