@@ -124,11 +124,24 @@ def update_metrics(log):
     print("Метрики обновлены:", len(m))
 
 
-def main():
-    if not TOKEN:
-        raise SystemExit("Нет THREADS_TOKEN: добавьте секрет в Settings → Secrets and variables → Actions")
-    me = call("GET", "me", fields="username")
-    print("Ключ работает, аккаунт:", me.get("username"))
+def git_save(msg):
+    """Сохранить журнал и метрики в репозиторий (внутри долгого запуска)."""
+    import subprocess as sp
+    files = [f for f in (LOG, "metrics.json") if os.path.exists(f)]
+    if not sp.run(["git", "status", "--porcelain"] + files, capture_output=True, text=True).stdout.strip():
+        return
+    sp.run(["git", "config", "user.name", "threads-bot"])
+    sp.run(["git", "config", "user.email", "threads-bot@users.noreply.github.com"])
+    sp.run(["git", "add"] + files)
+    sp.run(["git", "commit", "-m", msg])
+    for _ in range(3):
+        if sp.run(["git", "pull", "--rebase"]).returncode == 0 and sp.run(["git", "push"]).returncode == 0:
+            return
+        time.sleep(10)
+    print("Не удалось сохранить журнал в репозиторий")
+
+
+def run_once(state):
     log = json.load(open(LOG)) if os.path.exists(LOG) else {}
     now = datetime.now(DUBAI)
     default, dates = load_times()
@@ -140,15 +153,12 @@ def main():
         try:
             when = slot_time(name, default, dates)
         except (ValueError, KeyError):
-            print("Пропуск, неверное имя:", name)
             continue
         # время наступило, не позже чем через 6 часов, и только 08:00-22:30 по Дубаю
         if when <= now <= when + timedelta(hours=6) and (8, 0) <= (now.hour, now.minute) <= (22, 30):
             due.append((when, name))
     due.sort()
-    if not due:
-        print("Нечего публиковать", now.strftime("%Y-%m-%d %H:%M"), "по Дубаю")
-    for when, name in due[:1]:  # не больше одного поста за запуск
+    for when, name in due[:1]:  # не больше одного поста за проход
         folder, post = posts[name]
         if DRY:
             print("DRY_RUN: опубликовал бы", name, "картинок:", len(post.get("images", [])))
@@ -156,9 +166,40 @@ def main():
         pid, link = publish(folder, post, name)
         log[name] = {"id": pid, "permalink": link, "at": datetime.now(DUBAI).isoformat(timespec="minutes")}
         json.dump(log, open(LOG, "w"), ensure_ascii=False, indent=1)
-        print("Опубликовано:", name, link)
-    if not DRY and (now.hour == 22 or os.environ.get("METRICS") == "1"):
+        print("Опубликовано:", name, link, "в", now.strftime("%H:%M"))
+        git_save("Журнал: опубликован " + name)
+    today = now.date().isoformat()
+    if not DRY and now.hour == 22 and state.get("metrics") != today:
         update_metrics(log)
+        state["metrics"] = today
+        git_save("Метрики " + today)
+
+
+def main():
+    if not TOKEN:
+        raise SystemExit("Нет THREADS_TOKEN: добавьте секрет в Settings → Secrets and variables → Actions")
+    me = call("GET", "me", fields="username")
+    print("Ключ работает, аккаунт:", me.get("username"))
+    loop = int(os.environ.get("LOOP_MINUTES", "0") or 0)
+    end = time.time() + loop * 60
+    state = {}
+    if os.environ.get("METRICS") == "1" and not DRY:
+        update_metrics(json.load(open(LOG)) if os.path.exists(LOG) else {})
+        git_save("Метрики вручную")
+    while True:
+        try:
+            if loop:
+                import subprocess as sp
+                sp.run(["git", "pull", "--rebase", "-q"])  # подхватить новые посты и times.json
+            run_once(state)
+        except SystemExit as e:
+            print("Ошибка прохода:", e)
+            if not loop:
+                raise
+        if time.time() >= end:
+            break
+        time.sleep(60)
+    print("Проход завершён", datetime.now(DUBAI).strftime("%Y-%m-%d %H:%M"), "по Дубаю")
 
 
 if __name__ == "__main__":
