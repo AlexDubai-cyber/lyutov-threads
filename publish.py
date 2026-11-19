@@ -173,6 +173,10 @@ def run_once(state):
                 continue  # после сбоя не долбим API каждую минуту: повтор через 15 и 45 минут, максимум 3 попытки
             due.append((when, name))
     due.sort()
+    # между постами минимум 60 минут, чтобы после сбоя накопившиеся посты не вышли пачкой
+    last = max((datetime.fromisoformat(r["at"]) for r in log.values() if r.get("at")), default=None)
+    if due and last and now - last < timedelta(minutes=60):
+        due = []
     for when, name in due[:1]:  # не больше одного поста за проход
         folder, post = posts[name]
         if DRY:
