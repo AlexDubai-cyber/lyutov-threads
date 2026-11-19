@@ -24,19 +24,30 @@ LOG = "published.json"
 
 
 def call(method, path, **params):
+    """Запрос к Threads API. Сбои 5xx и сети повторяем 3 раза с паузой, потом SystemExit."""
     params["access_token"] = TOKEN
     data = urllib.parse.urlencode(params).encode()
     url = f"{API}/{path}"
-    if method == "GET":
-        req = urllib.request.Request(url + "?" + data.decode())
-    else:
-        req = urllib.request.Request(url, data=data, method="POST")
-    try:
-        with urllib.request.urlopen(req, timeout=60) as r:
-            return json.load(r)
-    except urllib.error.HTTPError as e:
-        body = e.read().decode(errors="replace")
-        raise SystemExit(f"Threads API {e.code} на {path}: {body}")
+    last = ""
+    for attempt in range(3):
+        if method == "GET":
+            req = urllib.request.Request(url + "?" + data.decode())
+        else:
+            req = urllib.request.Request(url, data=data, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=60) as r:
+                return json.load(r)
+        except urllib.error.HTTPError as e:
+            body = e.read().decode(errors="replace")[:500]
+            hint = e.headers.get("www-authenticate", "") or ""
+            dbg = e.headers.get("x-fb-debug", "") or ""
+            last = f"Threads API {e.code} на {path}: {body} {hint} (x-fb-debug {dbg[:40]})".strip()
+            if e.code < 500:
+                raise SystemExit(last)
+        except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
+            last = f"Сеть: {path}: {e}"
+        time.sleep(15 * (attempt + 1))
+    raise SystemExit(last)
 
 
 def wait_ready(cid, tries=20):
@@ -146,6 +157,7 @@ def run_once(state):
     now = datetime.now(DUBAI)
     default, dates = load_times()
     posts = list_posts()
+    fails = state.setdefault("fails", {})  # имя -> [число попыток, когда можно снова]
     due = []
     for name, (folder, post) in posts.items():
         if name in log:
@@ -156,6 +168,9 @@ def run_once(state):
             continue
         # время наступило, не позже чем через 6 часов, и только 08:00-22:30 по Дубаю
         if when <= now <= when + timedelta(hours=6) and (8, 0) <= (now.hour, now.minute) <= (22, 30):
+            n, after = fails.get(name, [0, 0])
+            if n >= 3 or time.time() < after:
+                continue  # после сбоя не долбим API каждую минуту: повтор через 15 и 45 минут, максимум 3 попытки
             due.append((when, name))
     due.sort()
     for when, name in due[:1]:  # не больше одного поста за проход
@@ -163,10 +178,18 @@ def run_once(state):
         if DRY:
             print("DRY_RUN: опубликовал бы", name, "картинок:", len(post.get("images", [])))
             continue
-        pid, link = publish(folder, post, name)
+        try:
+            pid, link = publish(folder, post, name)
+        except SystemExit as e:
+            n = fails.get(name, [0, 0])[0] + 1
+            fails[name] = [n, time.time() + (15 if n == 1 else 45) * 60]
+            state["errors"] = state.get("errors", 0) + 1
+            print(f"Сбой публикации {name} (попытка {n} из 3):", e, flush=True)
+            continue
+        fails.pop(name, None)
         log[name] = {"id": pid, "permalink": link, "at": datetime.now(DUBAI).isoformat(timespec="minutes")}
         json.dump(log, open(LOG, "w"), ensure_ascii=False, indent=1)
-        print("Опубликовано:", name, link, "в", now.strftime("%H:%M"))
+        print("Опубликовано:", name, link, "в", now.strftime("%H:%M"), flush=True)
         git_save("Журнал: опубликован " + name)
     today = now.date().isoformat()
     if not DRY and now.hour == 22 and state.get("metrics") != today:
@@ -175,31 +198,51 @@ def run_once(state):
         git_save("Метрики " + today)
 
 
+def check_key():
+    me = call("GET", "me", fields="username")
+    print("Ключ работает, аккаунт:", me.get("username"), flush=True)
+
+
 def main():
     if not TOKEN:
         raise SystemExit("Нет THREADS_TOKEN: добавьте секрет в Settings → Secrets and variables → Actions")
-    me = call("GET", "me", fields="username")
-    print("Ключ работает, аккаунт:", me.get("username"))
     loop = int(os.environ.get("LOOP_MINUTES", "0") or 0)
+    if not loop:
+        check_key()  # ручная проверка и dry run: сразу показать ошибку
     end = time.time() + loop * 60
     state = {}
+    key_ok, next_key_check = False, 0
     if os.environ.get("METRICS") == "1" and not DRY:
         update_metrics(json.load(open(LOG)) if os.path.exists(LOG) else {})
         git_save("Метрики вручную")
     while True:
         try:
-            if loop:
-                import subprocess as sp
-                sp.run(["git", "pull", "--rebase", "-q"])  # подхватить новые посты и times.json
-            run_once(state)
+            if loop and not key_ok:
+                if time.time() >= next_key_check:
+                    try:
+                        check_key()
+                        key_ok = True
+                    except SystemExit as e:
+                        state["errors"] = state.get("errors", 0) + 1
+                        print("Ключ не прошёл проверку, повтор через 10 минут:", e, flush=True)
+                        next_key_check = time.time() + 600
+            if key_ok or not loop:
+                if loop:
+                    import subprocess as sp
+                    sp.run(["git", "pull", "--rebase", "-q"])  # подхватить новые посты и times.json
+                run_once(state)
         except SystemExit as e:
-            print("Ошибка прохода:", e)
+            print("Ошибка прохода:", e, flush=True)
             if not loop:
                 raise
         if time.time() >= end:
             break
         time.sleep(60)
-    print("Проход завершён", datetime.now(DUBAI).strftime("%Y-%m-%d %H:%M"), "по Дубаю")
+    print("Проход завершён", datetime.now(DUBAI).strftime("%Y-%m-%d %H:%M"), "по Дубаю", flush=True)
+    if loop:
+        open(".ran_long", "w").write("1")  # цепочку продолжаем только после полного долгого прохода
+    if state.get("errors"):
+        raise SystemExit(f"За проход было ошибок: {state['errors']} (см. лог выше)")
 
 
 if __name__ == "__main__":
