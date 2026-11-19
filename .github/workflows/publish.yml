@@ -38,4 +38,12 @@ jobs:
         if: ${{ !cancelled() && github.event.inputs.dry_run != '1' }}
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh workflow run publish.yml --ref main -f dry_run=0
+        run: |
+          # Продолжаем цепочку только после полного долгого прохода (~5 ч 40 мин).
+          # Если запуск упал сразу, новый не запускаем: через час его поднимет резервный cron.
+          # Так ошибка ключа или сбой Meta не превращаются в сотни запусков подряд.
+          if [ -f .ran_long ]; then
+            gh workflow run publish.yml --ref main -f dry_run=0
+          else
+            echo "Короткий запуск завершился ошибкой, цепочку не продолжаю, ждём cron"
+          fi
