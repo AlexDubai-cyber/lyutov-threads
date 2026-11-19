@@ -1,0 +1,64 @@
+name: One-off authorized Marina news
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/test-news-20261119.yml']
+permissions:
+  contents: write
+concurrency:
+  group: one-off-marina-news-20261119
+  cancel-in-progress: false
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Publish exactly one authorized news item
+        env:
+          THREADS_TOKEN: ${{ secrets.THREADS_TOKEN }}
+        run: |
+          python - <<'PY'
+          import json, os, urllib.request, urllib.parse
+          from datetime import datetime, timezone
+          from pathlib import Path
+          import publish as p
+          if datetime.now(timezone.utc) > datetime.fromisoformat("2026-11-19T20:00:00+00:00"):
+              raise SystemExit("Expired one-off request; no publication")
+          key = "manual-news-2026-11-19-marina-vertiport"
+          log = json.loads(Path("published.json").read_text())
+          if key in log:
+              print("Already published", log[key].get("permalink", log[key]["id"]))
+              raise SystemExit(0)
+          def api(path, params=None):
+              params = dict(params or {})
+              params["access_token"] = p.TOKEN
+              data = urllib.parse.urlencode(params).encode()
+              req = urllib.request.Request(p.API + "/" + path, data=data if path != "me?fields=id,username" else None)
+              if path == "me?fields=id,username":
+                  req = urllib.request.Request(p.API + "/" + path + "&" + data.decode())
+              try:
+                  with urllib.request.urlopen(req, timeout=45) as response:
+                      return json.load(response)
+              except urllib.error.HTTPError as e:
+                  raise SystemExit("Threads HTTP " + str(e.code) + "; no automatic retry")
+              except Exception:
+                  raise SystemExit("Network result uncertain; do not retry without reconciliation")
+          me = api("me?fields=id,username")
+          if me.get("username") != "lyutov_ai":
+              raise SystemExit("Unexpected account; stopped")
+          text = "В Marina построили терминал летающего такси. Пробки пока не отменяем.\n\n18 ноября RTA сообщила: площадка у American University in Dubai готова и сертифицирована. Но пассажирские рейсы ещё ждут разрешений.\n\n«До DXB за 10 минут» пока прогноз перелёта, а не путь от квартиры до гейта. Покупая квартиру, эту разницу лучше не пропускать.\n\nhttps://www.wam.ae/en/article/3cx6isx0-dubai-marina-vertiport-completed-certified-handle"
+          assert len(text) <= 500
+          container = api("me/threads", {"media_type":"TEXT","text":text})
+          result = api("me/threads_publish", {"creation_id":container["id"]})
+          log[key] = {"id":result["id"],"at":datetime.now(p.DUBAI).isoformat(timespec="minutes")}
+          Path("published.json").write_text(json.dumps(log, ensure_ascii=False, indent=1))
+          print("Published ID:", result["id"])
+          p.git_save("Record authorized one-off Marina news")
+          
+          PY
