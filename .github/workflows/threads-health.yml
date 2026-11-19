@@ -1,0 +1,26 @@
+name: Threads read-only health check
+on:
+  workflow_dispatch:
+  push:
+    paths: ['.github/workflows/threads-health.yml']
+permissions: {}
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check identity only
+        env:
+          TOKEN: ${{ secrets.THREADS_TOKEN }}
+        run: |
+          python - <<'PY'
+          import json,os,urllib.request,urllib.error
+          for path in ['me?fields=id,username','me/permissions']:
+              req=urllib.request.Request('https://graph.threads.net/v1.0/'+path,headers={'Authorization':'Bearer '+os.environ['TOKEN']})
+              try:
+                  with urllib.request.urlopen(req,timeout=20) as res: d=json.load(res)
+                  print(path, 'OK', d.get('username')=='lyutov_ai' if 'username' in d else [(v.get('permission'),v.get('status')) for v in d.get('data',[])])
+              except urllib.error.HTTPError as e:
+                  try: d=json.loads(e.read()).get('error',{})
+                  except ValueError: d={}
+                  print(path,'HTTP',e.code,'Meta code',d.get('code'),'subcode',d.get('error_subcode'))
+          PY
