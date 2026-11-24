@@ -108,7 +108,7 @@ def test_timeout_checks_before_retry(monkeypatch, tmp_path):
     st["leads"]["P1"] = {"permalink": "", "building": "Bahar", "district": "JBR"}
     st["pending"]["P1"] = {"at": 1000, "tries": 1}
     sent = []
-    monkeypatch.setattr(leads, "reply_exists", lambda pid, since: "R_EXISTING")
+    monkeypatch.setattr(leads, "reply_exists", lambda pid, since, text="": "R_EXISTING")
     monkeypatch.setattr(leads, "publish_reply", lambda pid, text: sent.append(text) or "NEW")
     leads.do_comment(st, "P1", False, lambda *a: None)
     assert st["leads"]["P1"]["comment_id"] == "R_EXISTING" and sent == []
@@ -136,3 +136,10 @@ def test_old_publisher_untouched():
     import publish
     assert publish.slot_time("2026-11-24_1617", {"am": "10:17", "pm": "19:17"}, {}).strftime("%H:%M") == "16:17"
     assert "2026-11-24_1617" in publish.list_posts()
+
+
+def test_reply_exists_by_text_when_replied_to_hidden(monkeypatch, tmp_path):
+    leads, cfg = load(monkeypatch, tmp_path)
+    monkeypatch.setattr(leads, "call", lambda *a, **k: {"data": [{"id": "R9", "text": "Здравствуйте! Квартира в Bahar, JBR ещё актуальна? Можем обсудить в личных сообщениях?", "replied_to": None}]})
+    assert leads.reply_exists("P1", 0, leads.comment_text("Bahar, JBR", False)) == "R9"
+    assert leads.reply_exists("P1", 0, leads.comment_text("JVC", False)) is None
