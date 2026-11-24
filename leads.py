@@ -321,11 +321,15 @@ def search(q, since, until):
     return out
 
 
-def reply_exists(post_id, since_ts):
-    """Проверка после таймаута: наш ответ под этим постом уже опубликован?"""
-    r = call("GET", "me/replies", fields="id,replied_to,root_post,timestamp", since=since_ts, limit=50)
+def reply_exists(post_id, since_ts, text=""):
+    """Проверка после таймаута: наш ответ под этим постом уже опубликован?
+    replied_to/root_post для чужих постов API может не отдавать (проверено 25.11: None),
+    поэтому запасной признак — точный текст нашего ответа после времени попытки."""
+    r = call("GET", "me/replies", fields="id,text,replied_to,root_post,timestamp", since=since_ts, limit=50)
     for x in r.get("data", []):
         if post_id in ((x.get("replied_to") or {}).get("id"), (x.get("root_post") or {}).get("id")):
+            return x["id"]
+        if text and (x.get("text") or "").strip() == text.strip():
             return x["id"]
     return None
 
@@ -411,7 +415,7 @@ def do_comment(state, pid, dm_sent, log):
         return
     pend = state["pending"].get(pid)
     if pend:  # прошлый запуск мог упасть после отправки: сначала проверяем, вышел ли ответ
-        found = reply_exists(pid, pend["at"] - 60)
+        found = reply_exists(pid, pend["at"] - 60, pend.get("text", ""))
         if found:
             lead["comment_id"] = found
             state["pending"].pop(pid)
@@ -421,7 +425,7 @@ def do_comment(state, pid, dm_sent, log):
             log("  комментарий: 2 неудачные попытки, оставляю для ручной обработки")
             return
     text = comment_text(place_of(lead), dm_sent)
-    state["pending"][pid] = {"at": int(time.time()), "tries": (pend or {}).get("tries", 0) + 1}
+    state["pending"][pid] = {"at": int(time.time()), "tries": (pend or {}).get("tries", 0) + 1, "text": text}
     save_state(state)
     git_save("Мониторинг: намерение комментария")
     lead["comment_id"] = publish_reply(pid, text)
