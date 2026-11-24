@@ -323,9 +323,9 @@ def search(q, since, until):
 
 def reply_exists(post_id, since_ts):
     """Проверка после таймаута: наш ответ под этим постом уже опубликован?"""
-    r = call("GET", "me/replies", fields="id,replied_to,timestamp", since=since_ts, limit=50)
+    r = call("GET", "me/replies", fields="id,replied_to,root_post,timestamp", since=since_ts, limit=50)
     for x in r.get("data", []):
-        if (x.get("replied_to") or {}).get("id") == post_id:
+        if post_id in ((x.get("replied_to") or {}).get("id"), (x.get("root_post") or {}).get("id")):
             return x["id"]
     return None
 
@@ -539,12 +539,19 @@ def probe():
         except SystemExit as e:
             print(f"keyword_search «{q}»: {e}")
     try:
-        r = call("GET", "me/replies", fields="id,text,permalink,timestamp,replied_to", limit=50)
+        r = call("GET", "me/replies", fields="id,text,permalink,timestamp,replied_to,root_post,is_reply", limit=50)
         d = r.get("data", [])
         print("me/replies: доступно ответов", len(d))
         for x in d:
             if re.search(r"bahar|бахар|написал в лс", (x.get("text") or "").lower()):
-                print("  найден ответ:", x.get("permalink"), "| replied_to:", (x.get("replied_to") or {}).get("id"))
+                print("  найден ответ:", x.get("permalink"), "| replied_to:", x.get("replied_to"), "| root_post:", x.get("root_post"))
+                root = (x.get("root_post") or x.get("replied_to") or {}).get("id")
+                if root:
+                    try:
+                        o = call("GET", root, fields="id,username,permalink,text,timestamp")
+                        print("  исходный пост:", o.get("username"), o.get("permalink"), (o.get("text") or "")[:80].replace("\n", " "))
+                    except SystemExit as e:
+                        print("  исходный пост недоступен:", e)
     except SystemExit as e:
         print("me/replies:", e)
     print("Лайки и личные сообщения: в Threads API нет эндпоинтов, только очередь для ручной отправки.")
