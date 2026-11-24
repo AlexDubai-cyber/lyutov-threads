@@ -1,0 +1,45 @@
+name: Мониторинг объявлений аренды
+
+on:
+  schedule:
+    - cron: "7,22,37,52 * * * *"   # примерно каждые 15 минут; задержки GitHub перекрывает overlap_minutes
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "monitor = мониторинг, probe = только проверить доступ к API"
+        default: "probe"
+      dry_run:
+        description: "1 = ничего не отправлять, только показать отбор и тексты"
+        default: "1"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: threads-leads          # параллельные запуски ждут друг друга, отправка не дублируется
+  cancel-in-progress: false
+
+jobs:
+  leads:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # По расписанию работает только после включения переменной LEADS_ENABLED=1 (Settings → Variables)
+    if: ${{ github.event_name == 'workflow_dispatch' || vars.LEADS_ENABLED == '1' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -q cryptography
+      - name: Мониторинг
+        env:
+          THREADS_TOKEN: ${{ secrets.THREADS_TOKEN }}
+          LEADS_STATE_KEY: ${{ secrets.LEADS_STATE_KEY }}
+          LEADS_WHATSAPP: ${{ secrets.LEADS_WHATSAPP }}
+          LEADS_TELEGRAM_GROUP_URL: ${{ secrets.LEADS_TELEGRAM_GROUP_URL }}
+          LEADS_CLIENT_REQUESTS: ${{ secrets.LEADS_CLIENT_REQUESTS }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          LEADS_LIVE: ${{ (github.event_name == 'schedule' || github.event.inputs.dry_run == '0') && vars.LEADS_LIVE || '0' }}
+        run: |
+          if [ "${{ github.event.inputs.mode }}" = "probe" ]; then python leads.py probe; else python leads.py; fi
