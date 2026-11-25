@@ -534,6 +534,11 @@ def probe():
     """Проверка доступа без действий: чужие посты в поиске, свои ответы."""
     me = call("GET", "me", fields="id,username")
     print("Аккаунт:", me.get("username"))
+    try:
+        d = call("GET", "debug_token", input_token=env("THREADS_TOKEN")).get("data", {})
+        print("Разрешения ключа:", ", ".join(d.get("scopes", [])) or "нет данных", "| app_id:", d.get("app_id"), "| valid:", d.get("is_valid"))
+    except SystemExit as e:
+        print("debug_token:", e)
     for q in ["сдаю квартиру Дубай", "Bahar", "Дубай"]:
         try:
             r = call("GET", "keyword_search", q=q, search_type="RECENT", fields="id,username,timestamp", limit=25)
